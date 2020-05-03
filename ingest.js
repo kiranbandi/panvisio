@@ -9,7 +9,6 @@ fs.readdir('wheatdata/', function(err, filenames) {
     }
 
     let gffFiles = _.filter(filenames, (d) => d.indexOf('gff') > -1);
-    gffFiles = [gffFiles[0]];
 
     gffFiles.reduce((p, gffFilename) => {
         return p.then(() => {
@@ -20,18 +19,69 @@ fs.readdir('wheatdata/', function(err, filenames) {
                         return;
                     }
 
-                    let datastore = processGFF(gffFileData);
-                    const collinearFileName = gffFilename.split('_coordinate')[0] + '_collinear.collinearity';
+                    processGFF(gffFileData).then((data) => {
 
-                    fs.readFile('wheatdata/' + collinearFileName, 'utf-8', function(err, collinearData) {
+                        let { genomeLibrary, chromosomeMap } = data;
 
-                        let newData = processCollinear(collinearData);
+                        const referenceName = gffFilename.split('_coordinate')[0],
+                            collinearFileName = referenceName + '_collinear.collinearity';
 
-                        datastore.alignmentList = newData.alignmentList;
+                        fs.readFile('wheatdata/' + collinearFileName, 'utf-8', function(err, collinearData) {
 
+                            let newData = processCollinear(collinearData);
 
-                        debugger;
+                            let modifiedList = [];
 
+                            _.map(newData.alignmentList, (alignment) => {
+
+                                if (chromosomeMap.has(alignment.source) && chromosomeMap.has(alignment.target)) {
+
+                                    let firstLink = alignment.links[0],
+                                        lastLink = alignment.links[alignment.links.length - 1];
+
+                                    let sourceGenes = genomeLibrary.get(firstLink.source).start < genomeLibrary.get(lastLink.source).start ? [firstLink.source, lastLink.source] : [lastLink.source, firstLink.source];
+                                    let targetGenes = genomeLibrary.get(firstLink.target).start < genomeLibrary.get(lastLink.target).start ? [firstLink.target, lastLink.target] : [lastLink.target, firstLink.target];
+
+                                    _.each([0, 1], (value) => {
+                                        sourceGenes[value] = genomeLibrary.get(sourceGenes[value]).start;
+                                        targetGenes[value] = genomeLibrary.get(targetGenes[value]).start;
+                                    })
+
+                                    let sourceChromosome = chromosomeMap.get(alignment.source),
+                                        targetChromosome = chromosomeMap.get(alignment.target);
+
+                                    let sourceGeneWidth = (sourceGenes[1] - sourceGenes[0]),
+                                        targetGeneWidth = (targetGenes[1] - targetGenes[0]),
+                                        sourceX = (sourceGenes[0] - sourceChromosome.start),
+                                        targetX = (targetGenes[0] - targetChromosome.start),
+                                        // pick the one with the smaller width and ensure the minimum is 2px
+                                        linkWidth = Math.max(sourceGeneWidth, targetGeneWidth, 2);
+
+                                    modifiedList.push({
+                                        ...alignment,
+                                        sourceX,
+                                        sourceGeneWidth,
+                                        targetX,
+                                        targetGeneWidth
+                                    });
+                                }
+                            });
+
+                            let coordinateDataFile = [...chromosomeMap].map((d) => [d[1].speciesIdentifier, d[0], d[1].start, d[1].end, d[1].width].join('\t')).join('\n');
+
+                            let collinearDataFile = modifiedList.map((d) => {
+                                return [d.source, d.target, d.e_value, d.count, d.score, d.sourceX, d.sourceGeneWidth, d.targetX, d.targetGeneWidth].join('\t');
+                            }).join('\n');
+
+                            fs.writeFile('wheatdata/processed_data/' + referenceName + '.gff', coordinateDataFile, (err) => {
+                                if (err) throw err;
+                                fs.writeFile('wheatdata/processed_data/' + referenceName + '.col', collinearDataFile, (err) => {
+                                    if (err) throw err;
+                                    console.log(referenceName + ' processing complete');
+                                    resolve();
+                                });
+                            });
+                        });
                     });
                 });
             });
@@ -46,53 +96,58 @@ fs.readdir('wheatdata/', function(err, filenames) {
 
 
 function processGFF(gffData, additionalParams = {}) {
-    let genomeEntry,
-        genomeLibrary = new Map(),
-        chromosomeMap = new Map(),
-        { processScaffolds = false } = additionalParams;
 
-    gffData.split('\n').forEach(function(line) {
+    return new Promise((resolve, reject) => {
 
-            genomeEntry = line.split("\t");
-            // 4 tab seperated entries , 1st in chromosome index , 2nd is unique gene id ,3rd and 4th are the start and end positions
-            let chromosomeId = genomeEntry[0],
-                speciesIdentifier = genomeEntry[0].slice(0, 2),
-                geneStart = parseInt(genomeEntry[2]),
-                geneEnd = parseInt(genomeEntry[3]),
-                geneId = genomeEntry[1];
+        let genomeEntry,
+            genomeLibrary = new Map(),
+            chromosomeMap = new Map(),
+            { processScaffolds = false } = additionalParams;
 
-            // Taking in only non scafflod entries - unwanted entries end up being parsed as NaN and this filters them
-            if (chromosomeId.length >= 2 && (chromosomeId.length <= (processScaffolds ? 25 : 4))) {
-                genomeLibrary.set(geneId, {
-                        'start': geneStart,
-                        'end': geneEnd,
-                        // the first 2 characters are the genome name and can be removed
-                        'chromosomeId': chromosomeId
-                    })
-                    // To create a list of the start and end of all chromosomes
-                if (!chromosomeMap.has(chromosomeId)) {
-                    chromosomeMap.set(chromosomeId, {
-                        start: geneStart,
-                        end: geneEnd,
-                        'speciesIdentifier': speciesIdentifier
-                    });
-                } else {
-                    var entry = chromosomeMap.get(chromosomeId);
-                    if (geneStart < entry.start) {
-                        entry.start = geneStart;
+        gffData.split('\n').forEach(function(line) {
+
+                genomeEntry = line.split("\t");
+                // 4 tab seperated entries , 1st in chromosome index , 2nd is unique gene id ,3rd and 4th are the start and end positions
+                let chromosomeId = genomeEntry[0],
+                    speciesIdentifier = genomeEntry[0].slice(0, 2),
+                    geneStart = parseInt(genomeEntry[2]),
+                    geneEnd = parseInt(genomeEntry[3]),
+                    geneId = genomeEntry[1];
+
+                // Taking in only non scafflod entries - unwanted entries end up being parsed as NaN and this filters them
+                if (chromosomeId.length >= 2 && (chromosomeId.length <= (processScaffolds ? 25 : 4))) {
+                    genomeLibrary.set(geneId, {
+                            'start': geneStart,
+                            'end': geneEnd,
+                            // the first 2 characters are the genome name and can be removed
+                            'chromosomeId': chromosomeId
+                        })
+                        // To create a list of the start and end of all chromosomes
+                    if (!chromosomeMap.has(chromosomeId)) {
+                        chromosomeMap.set(chromosomeId, {
+                            start: geneStart,
+                            end: geneEnd,
+                            'speciesIdentifier': speciesIdentifier
+                        });
+                    } else {
+                        var entry = chromosomeMap.get(chromosomeId);
+                        if (geneStart < entry.start) {
+                            entry.start = geneStart;
+                        }
+                        if (geneEnd > entry.end) {
+                            entry.end = geneEnd;
+                        }
+                        chromosomeMap.set(chromosomeId, entry);
                     }
-                    if (geneEnd > entry.end) {
-                        entry.end = geneEnd;
-                    }
-                    chromosomeMap.set(chromosomeId, entry);
                 }
-            }
+            })
+            // once all parsing is done set width of each chromosome
+        chromosomeMap.forEach((chromosome) => {
+            chromosome.width = chromosome.end - chromosome.start;
         })
-        // once all parsing is done set width of each chromosome
-    chromosomeMap.forEach((chromosome) => {
-        chromosome.width = chromosome.end - chromosome.start;
-    })
-    return { genomeLibrary, chromosomeMap };
+        resolve({ genomeLibrary, chromosomeMap });
+    });
+
 };
 
 
@@ -103,7 +158,6 @@ function processCollinear(collinearityData) {
     // The first 11 lines contain information regarding the MCSCANX Parameters
     // and can be processed seperately 
     var FileLines = collinearityData.split('\n'),
-        information = parseInformation(FileLines.slice(0, 11)),
         alignmentList = [],
         alignmentBuffer = {};
     // remove the first 11 lines and then process the file line by line
@@ -123,29 +177,9 @@ function processCollinear(collinearityData) {
         })
         // push the last alignment still in the buffer
     alignmentList.push(alignmentBuffer);
-    // get the unique list of IDs of all chromosomes or scaffolds that have alignments mapped to them
-    let uniqueIDList = [];
-    alignmentList.map((d) => { uniqueIDList.push(d.source, d.target) });
-    return { "information": information, "alignmentList": alignmentList, 'uniqueIDList': uniqueIDList.filter(onlyUnique) };
+    return { "alignmentList": alignmentList };
 };
 
-function parseInformation(informationLines) {
-    return {
-        'parameters': [
-            ['match score', informationLines[1].split(':')[1].trim()],
-            ['match size', informationLines[2].split(':')[1].trim()],
-            ['gap penality', informationLines[3].split(':')[1].trim()],
-            ['overlap wndow', informationLines[4].split(':')[1].trim()],
-            ['e value', informationLines[5].split(':')[1].trim()],
-            ['maximum gaps', informationLines[6].split(':')[1].trim()]
-        ],
-        'stats': {
-            'no_of_collinear_genes': informationLines[8].split(',')[0].split(":")[1].trim(),
-            'percentage': Number(informationLines[8].split(',')[1].split(":")[1].trim()),
-            'no_of_all_genes': informationLines[8].split(',')[1].split(":")[1].trim()
-        }
-    };
-}
 
 function parseAlignmentDetails(alignmentDetails) {
     let alignmentDetailsList = alignmentDetails.split(' ');

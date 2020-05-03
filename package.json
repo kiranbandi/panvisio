@@ -12,7 +12,8 @@
     "scripts": {
         "start": "webpack-dev-server --config ./build-config/webpack.config.js --watch-poll",
         "build": "webpack -p --config ./build-config/webpack.prod.config.js",
-        "ingest": "nodemon --inspect-brk ingest.js"
+        "ingest": "nodemon --inspect-brk ingest.js",
+        "combine": "nodemon --inspect-brk combineGFF.js"
     },
     "author": "kiranbandi",
     "license": "MIT",
